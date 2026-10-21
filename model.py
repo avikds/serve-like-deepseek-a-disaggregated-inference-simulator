@@ -1047,3 +1047,49 @@ def block_hashes(tokens, block=128):
 
     return hashes
 
+# Step 15 - prefix_hit
+def prefix_hit(blocks, swa, hashes, n_tokens, block=128, window=128, backtrack=6):
+    # Maximum number of prompt tokens eligible for prefix caching.
+    cap = max(0, n_tokens - (window + backtrack))
+
+    # Count the longest leading run of cached, complete blocks,
+    # limited by the cap.
+    max_blocks = min(cap // block, len(hashes))
+    n_hit_blocks = 0
+
+    for i in range(max_blocks):
+        if hashes[i] not in blocks:
+            break
+        n_hit_blocks += 1
+
+    block_hit = n_hit_blocks * block
+
+    # No leading cached blocks means no cache hit.
+    if n_hit_blocks == 0:
+        return {
+            "cap": cap,
+            "block_hit": 0,
+            "hit": 0,
+        }
+
+    # A single cached block needs no sliding-window state.
+    if n_hit_blocks == 1:
+        hit = block_hit
+    else:
+        # Check the last and second-to-last hashes in the cached run.
+        last_hash = hashes[n_hit_blocks - 1]
+        previous_hash = hashes[n_hit_blocks - 2]
+
+        # Either state validates the entire cached prefix.
+        if last_hash in swa or previous_hash in swa:
+            hit = block_hit
+        else:
+            # Otherwise, back off by one complete block.
+            hit = block_hit - block
+
+    return {
+        "cap": cap,
+        "block_hit": block_hit,
+        "hit": max(0, min(hit, cap)),
+    }
+

@@ -24,6 +24,7 @@ python scaffold.py
 - [x] **12.** route_decode
 - [x] **13.** DecodePool
 - [x] **14.** block_hashes
+- [x] **15.** prefix_hit
 
 ---
 
