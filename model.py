@@ -687,3 +687,84 @@ def expert_loads(n_tokens, n_experts, k, skew, rng, perm=None):
     # distribution and return the integer token count for each expert.
     return rng.multinomial(n_tokens * k, p)
 
+# Step 11 - moe_lb_trace
+def moe_lb_trace(step_loads, n_ranks, redundant_per_rank, window, period):
+    # Convert the input into a NumPy array.
+    step_loads = np.asarray(step_loads)
+
+    # Get the number of decode steps and experts.
+    n_steps, n_experts = step_loads.shape
+
+    if n_ranks <= 0:
+        raise ValueError("n_ranks must be positive")
+
+    if period <= 0:
+        raise ValueError("period must be positive")
+
+    if n_experts % n_ranks != 0:
+        raise ValueError("n_experts must be divisible by n_ranks")
+
+    # Initially distribute experts contiguously across ranks, with one
+    # copy of every expert.
+    experts_per_rank = n_experts // n_ranks
+
+    placement = [
+        list(range(
+            rank * experts_per_rank,
+            (rank + 1) * experts_per_rank
+        ))
+        for rank in range(n_ranks)
+    ]
+
+    replicas = [1] * n_experts
+
+    # Store the load-imbalance metric for each decode step.
+    imbalance_trace = []
+    reassignments = 0
+
+    for t in range(n_steps):
+        # Reassign experts periodically, before evaluating this step.
+        # Do not reassign at t = 0 because the initial placement is used.
+        if t > 0 and t % period == 0:
+            # Aggregate expert loads over the preceding observation window.
+            start = max(0, t - window)
+            recent_loads = step_loads[start:t].sum(axis=0)
+
+            # Rebalance experts using their recent aggregate loads.
+            result = eplb_assign(
+                recent_loads,
+                n_ranks,
+                redundant_per_rank
+            )
+
+            placement = result["placement"]
+            replicas = result["replicas"]
+            reassignments += 1
+
+        # Calculate each rank's load for the current step.
+        # Each expert's load is divided equally among its replicas.
+        rank_loads = []
+
+        for rank in range(n_ranks):
+            rank_load = sum(
+                float(step_loads[t, expert]) / replicas[expert]
+                for expert in placement[rank]
+            )
+            rank_loads.append(rank_load)
+
+        # Record the current step's expert-parallel load imbalance.
+        imbalance_trace.append(moe_lb(rank_loads))
+
+    # Calculate the average imbalance across all steps.
+    mean_imbalance = (
+        round(float(np.mean(imbalance_trace)), 4)
+        if imbalance_trace
+        else 0.0
+    )
+
+    return {
+        "moe_lb": imbalance_trace,
+        "mean": mean_imbalance,
+        "reassignments": reassignments,
+    }
+

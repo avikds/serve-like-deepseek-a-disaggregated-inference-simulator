@@ -20,6 +20,7 @@ python scaffold.py
 - [x] **8.** run_prefill_pool
 - [x] **9.** eplb_assign
 - [x] **10.** expert_loads
+- [x] **11.** moe_lb_trace
 
 ---
 
