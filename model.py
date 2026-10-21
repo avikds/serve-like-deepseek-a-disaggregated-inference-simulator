@@ -101,3 +101,60 @@ def fit_cost_model(samples):
     # Return Python floats rounded to six decimal places.
     return tuple(float(round(value, 6)) for value in coeffs)
 
+# Step 3 - tier_demand
+def context_tier(ctx, tiers=(16000, 64000, 256000)):
+    # Return the number of tier boundaries that ctx meets or exceeds.
+    # For the default tiers, the resulting indices are:
+    # 0: below 16K, 1: 16K–64K, 2: 64K–256K, 3: 256K and above.
+    return sum(1 for boundary in tiers if ctx >= boundary)
+
+
+def tier_demand(requests, coeffs, tiers=(16000, 64000, 256000)):
+    # There is one more tier than the number of boundaries.
+    num_tiers = len(tiers) + 1
+
+    # Initialize per-request tier assignments and per-tier statistics.
+    tier_per_request = []
+    counts = [0] * num_tiers
+    demand_totals = [0.0] * num_tiers
+
+    # Assign each request to a tier and accumulate its prefill demand.
+    for request in requests:
+        ctx = request["ctx"]
+        cached = request["cached"]
+
+        # Classify the request using its full context length.
+        tier = context_tier(ctx, tiers)
+        tier_per_request.append(tier)
+        counts[tier] += 1
+
+        # Only uncached tokens require new prefill computation.
+        q = ctx - cached
+
+        # Convert the estimated prefill cost from nanoseconds to seconds.
+        demand_seconds = prefill_cost(q, cached, coeffs) / 1e9
+
+        # Accumulate demand for this context-length tier.
+        demand_totals[tier] += demand_seconds
+
+    # Calculate total prefill demand across all tiers.
+    total_demand = sum(demand_totals)
+
+    # Calculate each tier's share of total demand.
+    # If the total demand is zero, all shares must be 0.0.
+    if total_demand == 0:
+        shares = [0.0] * num_tiers
+    else:
+        shares = [
+            round(demand / total_demand, 4)
+            for demand in demand_totals
+        ]
+
+    # Return the required dictionary with the specified rounding.
+    return {
+        "tier": tier_per_request,
+        "counts": counts,
+        "demand_s": [round(demand, 3) for demand in demand_totals],
+        "shares": shares,
+    }
+
