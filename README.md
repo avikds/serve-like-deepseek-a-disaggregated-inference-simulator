@@ -26,6 +26,7 @@ python scaffold.py
 - [x] **14.** block_hashes
 - [x] **15.** prefix_hit
 - [x] **16.** KVStore
+- [x] **17.** make_reuse_stream
 
 ---
 

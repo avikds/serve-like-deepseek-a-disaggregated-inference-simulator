@@ -1166,3 +1166,53 @@ class KVStore:
 
         return self.hit / self.requested
 
+# Step 17 - make_reuse_stream
+def make_reuse_stream(n, seed, cls, days=14.0):
+    # Create a reproducible random number generator.
+    rng = np.random.default_rng(seed)
+
+    if cls == "chat":
+        # Chat traffic reuses prefixes drawn from a Zipf distribution.
+        prefix_ids = rng.zipf(1.5, size=n) % 20000
+
+        # Spread requests uniformly across the specified time period.
+        t = rng.uniform(0.0, days, size=n)
+
+        # Each chat request uses 16 blocks.
+        n_blocks = np.full(n, 16, dtype=int)
+
+    else:
+        # Agent traffic is organized into sessions, with at least one
+        # session even when n is small.
+        n_sessions = max(1, n // 8)
+
+        # Generate session start times.
+        start = rng.uniform(0.0, days, size=n_sessions)
+
+        # Assign each request to a session.
+        session = rng.integers(0, n_sessions, size=n)
+
+        # Requests in the same session share a prefix ID.
+        prefix_ids = session + 100000
+
+        # Generate request times relative to their session start times.
+        t = start[session] + rng.exponential(0.05, size=n)
+
+        # Each agent request uses 300 blocks.
+        n_blocks = np.full(n, 300, dtype=int)
+
+    # Sort requests chronologically while preserving their original
+    # order when timestamps are equal.
+    order = np.argsort(t, kind="stable")
+
+    # Return (time in days, prefix ID, block count), using Python
+    # floats and ints rather than NumPy scalar types.
+    return [
+        (
+            float(t[i]),
+            int(prefix_ids[i]),
+            int(n_blocks[i]),
+        )
+        for i in order
+    ]
+
