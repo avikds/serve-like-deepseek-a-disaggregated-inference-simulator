@@ -1332,3 +1332,99 @@ def verification_budget(alpha, conc, t0, kappa):
         "tokens_per_step": tokens_per_step,
     }
 
+# Step 21 - async_step_times
+def async_step_times(n_steps, t_sched, t_fwd, t_sample, t_post, t_launch, mode):
+    # GPU execution time for one decode step.
+    gpu_step_ms = t_fwd + t_sample
+
+    # Serial execution: scheduling, forward pass, sampling, and
+    # post-processing occur consecutively for every step.
+    if mode == "serial":
+        step_ms = t_sched + t_fwd + t_sample + t_post
+        emit_times = [
+            (i + 1) * step_ms
+            for i in range(n_steps)
+        ]
+
+        makespan = emit_times[-1] if emit_times else 0.0
+
+    elif mode == "async":
+        # Validate the execution mode above; model independent CPU and GPU
+        # availability times for the overlapped schedule.
+        cpu_free = 0.0
+        gpu_free = 0.0
+
+        # Store launch completion, GPU completion, and emission times
+        # for each decode step.
+        launch_times = [0.0] * n_steps
+        gpu_finish_times = [0.0] * n_steps
+        emit_times = [0.0] * n_steps
+
+        if n_steps > 0:
+            # The CPU schedules and launches the first step.
+            cpu_free += t_sched + t_launch
+            launch_times[0] = cpu_free
+
+            for n in range(n_steps):
+                # The GPU starts this step when both it and the step
+                # are available.
+                gpu_start = max(gpu_free, launch_times[n])
+                gpu_finish = gpu_start + gpu_step_ms
+
+                gpu_finish_times[n] = gpu_finish
+                gpu_free = gpu_finish
+
+                # Schedule and launch the next step while GPU work runs,
+                # if another step exists.
+                if n + 1 < n_steps:
+                    cpu_free += t_sched + t_launch
+                    launch_times[n + 1] = cpu_free
+
+                # Post-process step n-1 once the CPU is free and that
+                # step's GPU execution has completed.
+                if n - 1 >= 0:
+                    post_start = max(
+                        cpu_free,
+                        gpu_finish_times[n - 1],
+                    )
+                    emit_times[n - 1] = post_start + t_post
+                    cpu_free = emit_times[n - 1]
+
+            # Post-process the final step after the loop.
+            last = n_steps - 1
+            post_start = max(cpu_free, gpu_finish_times[last])
+            emit_times[last] = post_start + t_post
+
+        makespan = emit_times[-1] if emit_times else 0.0
+
+    else:
+        raise ValueError("mode must be 'serial' or 'async'")
+
+    # Calculate the fraction of the makespan during which the GPU
+    # was not performing forward-pass or sampling work.
+    if makespan > 0:
+        gpu_idle_frac = 1.0 - (n_steps * gpu_step_ms) / makespan
+    else:
+        gpu_idle_frac = 0.0
+
+    # Mean interval between emissions, or None for zero/one emission.
+    if len(emit_times) > 1:
+        mean_step = sum(
+            emit_times[i] - emit_times[i - 1]
+            for i in range(1, len(emit_times))
+        ) / (len(emit_times) - 1)
+    else:
+        mean_step = None
+
+    # Return all numeric values rounded to four decimal places.
+    return {
+        "emit_times": [round(float(t), 4) for t in emit_times],
+        "makespan": round(float(makespan), 4),
+        "gpu_idle_frac": round(float(gpu_idle_frac), 4),
+        "mean_step": (
+            round(float(mean_step), 4)
+            if mean_step is not None
+            else None
+        ),
+    }
+

@@ -30,6 +30,7 @@ python scaffold.py
 - [x] **18.** hit_rate_vs_ttl
 - [x] **19.** plan_verification
 - [x] **20.** verification_budget
+- [x] **21.** async_step_times
 
 ---
 
