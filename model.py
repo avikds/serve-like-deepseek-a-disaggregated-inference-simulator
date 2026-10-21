@@ -1246,3 +1246,43 @@ def hit_rate_vs_ttl(stream, ttls_days, capacity_blocks):
 
     return results
 
+# Step 19 - plan_verification
+def plan_verification(conf, budget):
+    # Convert confidence values to a NumPy array.
+    conf = np.asarray(conf, dtype=float)
+
+    R, D = conf.shape
+
+    # Compute cumulative acceptance probabilities for each sequence.
+    # Verification stops at the first rejected draft.
+    cumulative = np.cumprod(conf, axis=1)
+
+    # Create a global list of (expected value, sequence index, draft index).
+    candidates = [
+        (float(cumulative[r, j]), r, j)
+        for r in range(R)
+        for j in range(D)
+    ]
+
+    # Rank by expected value descending, then sequence index and
+    # draft index ascending to resolve ties deterministically.
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+
+    # Select the highest-value drafts within the global verification budget.
+    n_verified = min(max(0, int(budget)), R * D)
+    selected = candidates[:n_verified]
+
+    # Count selected drafts for each sequence.
+    lengths = [0] * R
+    expected_accepted = 0.0
+
+    for value, r, j in selected:
+        lengths[r] += 1
+        expected_accepted += value
+
+    return {
+        "lengths": lengths,
+        "expected_accepted": round(expected_accepted, 4),
+        "verified": n_verified,
+    }
+
