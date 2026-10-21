@@ -19,6 +19,7 @@ python scaffold.py
 - [x] **7.** PrefillEngine
 - [x] **8.** run_prefill_pool
 - [x] **9.** eplb_assign
+- [x] **10.** expert_loads
 
 ---
 

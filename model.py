@@ -666,3 +666,24 @@ def eplb_assign(loads, n_ranks, redundant_per_rank):
         "moe_lb": moe_lb(rank_loads),
     }
 
+# Step 10 - expert_loads
+def expert_loads(n_tokens, n_experts, k, skew, rng, perm=None):
+    # Assign each expert a power-law probability.
+    # Lower-indexed experts receive higher probabilities when skew > 0.
+    p = np.arange(1, n_experts + 1, dtype=float) ** (-skew)
+
+    # Normalize probabilities so they sum to one.
+    p = p / p.sum()
+
+    # Optionally reorder probabilities according to the supplied permutation.
+    # This changes which expert positions receive the highest traffic.
+    if perm is not None:
+        p = p[np.asarray(perm)]
+
+        # Normalize again to ensure a valid probability distribution.
+        p = p / p.sum()
+
+    # Model n_tokens * k independent expert selections using a multinomial
+    # distribution and return the integer token count for each expert.
+    return rng.multinomial(n_tokens * k, p)
+
