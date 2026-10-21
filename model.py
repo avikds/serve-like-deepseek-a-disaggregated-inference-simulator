@@ -1649,3 +1649,40 @@ def sweep_pd_ratio(workload, total_gpus, cfg, prefill_fracs=(0.25, 0.5, 0.75)):
 
     return results
 
+# Step 25 - pareto_frontier
+def cost_per_million(tokens_per_s, n_gpus, price_per_gpu_hour):
+    # Calculate the total cluster cost per hour.
+    cost_per_hour = price_per_gpu_hour * n_gpus
+
+    # Convert throughput from tokens/second to tokens/hour, then
+    # calculate the cost per million generated tokens.
+    if tokens_per_s <= 0:
+        return float("inf")
+
+    cost = cost_per_hour / (tokens_per_s * 3600) * 1e6
+
+    return round(cost, 4)
+
+
+def pareto_frontier(points, x_key, y_key):
+    # Sort by descending x (higher is better), then ascending y
+    # (lower is better).
+    ordered = sorted(
+        points,
+        key=lambda point: (-point[x_key], point[y_key])
+    )
+
+    frontier = []
+    best_y = float("inf")
+
+    # Keep a point only when its y value strictly improves on all
+    # previously retained points.
+    for point in ordered:
+        y = point[y_key]
+
+        if y < best_y:
+            frontier.append(point)
+            best_y = y
+
+    return frontier
+
