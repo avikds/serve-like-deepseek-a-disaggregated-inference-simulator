@@ -1022,3 +1022,28 @@ class DecodePool:
 
         return self.finished
 
+# Step 14 - block_hashes
+MOD = 2 ** 61 - 1
+
+
+def block_hashes(tokens, block=128):
+    # Start the rolling hash at zero.
+    h = 0
+    hashes = []
+
+    # Process only complete blocks; ignore any trailing partial block.
+    n_full_blocks = len(tokens) // block
+
+    for i in range(n_full_blocks):
+        start = i * block
+        end = start + block
+
+        # Fold each token into the hash, preserving the entire prefix.
+        for token in tokens[start:end]:
+            h = (h * 131 + int(token) + 1) % MOD
+
+        # Record the cumulative hash for this full block.
+        hashes.append(h)
+
+    return hashes
+
