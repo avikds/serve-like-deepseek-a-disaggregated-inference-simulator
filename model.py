@@ -158,3 +158,31 @@ def tier_demand(requests, coeffs, tiers=(16000, 64000, 256000)):
         "shares": shares,
     }
 
+# Step 4 - decode_step_time
+def ep_params(ep, expert_bytes_total, hbm_bw, fixed_ms=0.6, alpha=0.05, beta=1e-5):
+    # Calculate the expert-weight read time in milliseconds.
+    # expert_bytes_total / ep / hbm_bw gives the time in seconds.
+    expert_read_ms = (expert_bytes_total / ep / hbm_bw) * 1000.0
+
+    # Add the fixed time for dense-weight processing.
+    t0 = expert_read_ms + fixed_ms
+
+    # Return the decode-step parameters, including the default
+    # MoE load-balancing multiplier of 1.0.
+    return {
+        "t0": t0,
+        "alpha": alpha,
+        "beta": beta,
+        "moe_lb": 1.0,
+    }
+
+
+def decode_step_time(B, K, params):
+    # Calculate the decode step time in milliseconds:
+    # base expert-weight cost, batch-size cost, and KV-token cost.
+    return (
+        params["t0"] * params.get("moe_lb", 1.0)
+        + params["alpha"] * B
+        + params["beta"] * K
+    )
+
