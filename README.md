@@ -17,6 +17,7 @@ python scaffold.py
 - [x] **5.** chunk_for
 - [x] **6.** plan_prefill_step
 - [x] **7.** PrefillEngine
+- [x] **8.** run_prefill_pool
 
 ---
 

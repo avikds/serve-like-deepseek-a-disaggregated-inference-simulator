@@ -343,3 +343,220 @@ class PrefillEngine:
 
         return completed
 
+# Step 8 - run_prefill_pool
+def allocate_engines(shares, n_engines):
+    # Convert each tier's demand share into its raw engine allocation.
+    raw = [float(share) * n_engines for share in shares]
+
+    # Initially assign the floor of each raw allocation.
+    counts = [int(math.floor(value)) for value in raw]
+
+    # Give every tier with positive demand at least one engine.
+    for i, share in enumerate(shares):
+        if share > 0:
+            counts[i] = max(1, counts[i])
+
+    # If the minimum-one-engine rule over-allocates the pool, remove
+    # engines from the tier with the largest count-minus-raw difference.
+    # Ties are resolved in favor of the lower tier index.
+    while sum(counts) > n_engines:
+        candidates = [i for i, count in enumerate(counts) if count > 0]
+
+        if not candidates:
+            break
+
+        i = max(
+            candidates,
+            key=lambda j: (counts[j] - raw[j], -j)
+        )
+        counts[i] -= 1
+
+    # If engines remain unallocated, give each next engine to the tier
+    # with the largest raw-minus-count difference.
+    # Ties are resolved in favor of the lower tier index.
+    while sum(counts) < n_engines:
+        if not counts:
+            break
+
+        i = max(
+            range(len(counts)),
+            key=lambda j: (raw[j] - counts[j], -j)
+        )
+        counts[i] += 1
+
+    return counts
+
+
+def run_prefill_pool(
+    requests,
+    n_engines,
+    coeffs,
+    budget_ns,
+    tiered=True,
+    tiers=(16000, 64000, 256000),
+):
+    # Keep the original request dictionaries but process them in
+    # deterministic arrival-time and request-ID order.
+    request_list = list(requests)
+    ordered = sorted(
+        request_list,
+        key=lambda req: (req["t_arrive"], req["id"])
+    )
+
+    # Handle an empty workload without running the simulation.
+    if not ordered:
+        return {
+            "by_tier": {},
+            "makespan_ms": 0.0,
+            "utilization": 0.0,
+            "ttft_ms": {},
+        }
+
+    # A nonempty workload requires at least one engine and a positive
+    # budget so that simulation time can advance.
+    if n_engines <= 0:
+        raise ValueError("n_engines must be positive")
+
+    if budget_ns <= 0:
+        raise ValueError("budget_ns must be positive")
+
+    # Create the prefill engines.
+    engines = [
+        PrefillEngine(coeffs, budget_ns)
+        for _ in range(n_engines)
+    ]
+    all_engine_ids = list(range(n_engines))
+
+    # There is one context tier for each interval defined by the
+    # boundaries, plus one tier for contexts above the last boundary.
+    num_tiers = len(tiers) + 1
+
+    if tiered:
+        # Estimate the compute-demand shares for the context tiers.
+        shares = tier_demand(
+            request_list,
+            coeffs,
+            tiers
+        )["shares"]
+
+        # Allocate engines among tiers based on their demand shares.
+        engine_counts = allocate_engines(shares, n_engines)
+
+        # Give each tier a consecutive block of engines.
+        # For example, allocations [1, 2, 1] give:
+        # tier 0 -> [0], tier 1 -> [1, 2], tier 2 -> [3].
+        groups = []
+        start = 0
+
+        for count in engine_counts:
+            groups.append(list(range(start, start + count)))
+            start += count
+
+    else:
+        # Without tiering, every context tier can use every engine.
+        groups = [
+            all_engine_ids[:]
+            for _ in range(num_tiers)
+        ]
+
+    # Simulation time is maintained in milliseconds.
+    tick_ms = budget_ns / 1e6
+    now = 0.0
+
+    # Track which requests have been submitted and completed.
+    next_request = 0
+    completed = []
+
+    # Advance the simulation one scheduling tick at a time.
+    while len(completed) < len(ordered):
+
+        # First, submit every request that has arrived by this tick.
+        while (
+            next_request < len(ordered)
+            and ordered[next_request]["t_arrive"] * 1000 <= now
+        ):
+            req = ordered[next_request]
+
+            # Determine the request's context-length tier.
+            tier = context_tier(req["ctx"], tiers)
+
+            # Prefer engines assigned to this tier. If the tier has
+            # no engines, fall back to the entire pool.
+            candidates = groups[tier]
+
+            if not candidates:
+                candidates = all_engine_ids
+
+            # Choose the engine with the fewest pending tokens.
+            # The engine index breaks ties in favor of the lower index.
+            engine_idx = min(
+                candidates,
+                key=lambda j: (
+                    engines[j].pending_tokens(),
+                    j,
+                )
+            )
+
+            engines[engine_idx].submit(req)
+            next_request += 1
+
+        # Next, execute one budgeted prefill step on every engine.
+        for engine in engines:
+            finished = engine.step(now)
+            completed.extend(finished)
+
+        # Advance to the next scheduling tick. This also makes the
+        # final makespan reflect the discrete scheduling interval.
+        now += tick_ms
+
+    # Group the original requests by their actual context-length tier.
+    # Only tiers containing requests are included in the summary.
+    requests_by_tier = {}
+
+    for req in request_list:
+        tier = context_tier(req["ctx"], tiers)
+        requests_by_tier.setdefault(tier, []).append(req)
+
+    # Calculate TTFT percentiles for every populated tier.
+    by_tier = {}
+
+    for tier in sorted(requests_by_tier):
+        tier_requests = requests_by_tier[tier]
+        ttfts = [
+            float(req["ttft_ms"])
+            for req in tier_requests
+        ]
+
+        by_tier[tier] = {
+            "count": len(tier_requests),
+            "p50_ms": round(
+                float(np.percentile(ttfts, 50)), 1
+            ),
+            "p99_ms": round(
+                float(np.percentile(ttfts, 99)), 1
+            ),
+        }
+
+    # Calculate total engine busy time and overall pool utilization.
+    total_busy_ms = sum(engine.busy_ms for engine in engines)
+    total_capacity_ms = n_engines * now
+
+    utilization = (
+        round(total_busy_ms / total_capacity_ms, 4)
+        if total_capacity_ms > 0
+        else 0.0
+    )
+
+    # Return TTFT by request ID, rounded to one decimal place.
+    ttft_by_id = {
+        req["id"]: round(float(req["ttft_ms"]), 1)
+        for req in request_list
+    }
+
+    return {
+        "by_tier": by_tier,
+        "makespan_ms": round(float(now), 1),
+        "utilization": utilization,
+        "ttft_ms": ttft_by_id,
+    }
+
