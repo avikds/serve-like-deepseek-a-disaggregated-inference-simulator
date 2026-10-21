@@ -1428,3 +1428,38 @@ def async_step_times(n_steps, t_sched, t_fwd, t_sample, t_post, t_launch, mode):
         ),
     }
 
+# Step 22 - decode_throughput_curve
+def decode_throughput_curve(conc_list, alpha, t0, kappa, fixed_m=5):
+    results = []
+
+    # Compare fixed-length and dynamically optimized verification
+    # at each requested concurrency level.
+    for conc in conc_list:
+        profile = verification_budget(alpha, conc, t0, kappa)
+
+        # Fixed-length verification uses the throughput at fixed_m,
+        # capped at the number of available speculative positions.
+        m_fixed = min(fixed_m, len(alpha))
+        fixed = profile["table"][m_fixed][1]
+
+        # Dynamic verification chooses the length with maximum throughput.
+        best_m = profile["best_m"]
+        dynamic = profile["table"][best_m][1]
+
+        # Calculate the percentage throughput improvement.
+        gain_pct = (
+            round((dynamic / fixed - 1.0) * 100.0, 2)
+            if fixed != 0
+            else 0.0
+        )
+
+        results.append({
+            "conc": conc,
+            "fixed": fixed,
+            "best_m": best_m,
+            "dynamic": dynamic,
+            "gain_pct": gain_pct,
+        })
+
+    return results
+
