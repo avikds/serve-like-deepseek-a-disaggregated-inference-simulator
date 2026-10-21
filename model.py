@@ -806,3 +806,219 @@ def route_decode(need_tokens, gpus, bytes_per_token):
     # Return -1 if no GPU can accommodate the request.
     return best_gpu
 
+# Step 13 - DecodePool
+class DecodePool:
+    def __init__(
+        self,
+        n_gpus,
+        slots,
+        kv_bytes,
+        bytes_per_token,
+        params,
+        router="headroom",
+        tokens_per_step=1.0,
+    ):
+        self.bytes_per_token = bytes_per_token
+        self.params = params
+        self.router = router
+        self.tokens_per_step = tokens_per_step
+
+        # Initialize GPU capacity, active sequences, and independent clocks.
+        self.gpus = [
+            {
+                "slots": slots,
+                "kv_bytes": float(kv_bytes),
+                "used_slots": 0,
+                "used_kv": 0.0,
+                "seqs": [],
+                "clock": 0.0,
+                "busy_ms": 0.0,
+            }
+            for _ in range(n_gpus)
+        ]
+
+        # FIFO queue of (request, admission_time_ms).
+        self.waiting = collections.deque()
+        self.finished = []
+
+    def _choose_gpu(self, req):
+        # Reserve memory for the request's full context and output.
+        need_tokens = req["ctx"] + req["out"]
+        need_bytes = need_tokens * self.bytes_per_token
+
+        if self.router == "headroom":
+            # Prefer the feasible GPU with the greatest request headroom.
+            return route_decode(
+                need_tokens,
+                self.gpus,
+                self.bytes_per_token,
+            )
+
+        if self.router == "count":
+            # Choose the feasible GPU with the fewest occupied slots.
+            # The GPU index resolves ties.
+            candidates = []
+
+            for i, gpu in enumerate(self.gpus):
+                free_slots = gpu["slots"] - gpu["used_slots"]
+                free_kv = gpu["kv_bytes"] - gpu["used_kv"]
+
+                if free_slots > 0 and free_kv >= need_bytes:
+                    candidates.append((gpu["used_slots"], i))
+
+            return min(candidates)[1] if candidates else -1
+
+        raise ValueError("router must be 'headroom' or 'count'")
+
+    def _drain_waiting(self):
+        # Admit requests in FIFO order until the head cannot fit.
+        while self.waiting:
+            req, t_in = self.waiting[0]
+            gpu_idx = self._choose_gpu(req)
+
+            if gpu_idx < 0:
+                break
+
+            self.waiting.popleft()
+            gpu = self.gpus[gpu_idx]
+
+            reserved_tokens = req["ctx"] + req["out"]
+            reserved_bytes = reserved_tokens * self.bytes_per_token
+
+            # Reserve the batch slot and KV memory.
+            gpu["used_slots"] += 1
+            gpu["used_kv"] += reserved_bytes
+
+            # The GPU cannot start before the request's admission time.
+            gpu["clock"] = max(gpu["clock"], t_in)
+
+            gpu["seqs"].append({
+                "req": req,
+                "ctx": req["ctx"],
+                "produced": 0.0,
+                "t_in": t_in,
+                "steps": 0,
+                "first": None,
+            })
+
+    def admit(self, req, now_ms):
+        # Queue the request, then admit as many FIFO requests as can fit.
+        self.waiting.append((req, now_ms))
+        self._drain_waiting()
+
+    def run_until(self, now_ms):
+        # Advance every GPU using its own clock.
+        for gpu_idx, gpu in enumerate(self.gpus):
+            while gpu["seqs"] and gpu["clock"] < now_ms:
+                seqs = gpu["seqs"]
+
+                # Calculate the duration of one decode step for this batch.
+                batch_size = len(seqs)
+                total_context = sum(seq["ctx"] for seq in seqs)
+
+                dt = decode_step_time(
+                    batch_size,
+                    total_context,
+                    self.params,
+                )
+
+                gpu["clock"] += dt
+                gpu["busy_ms"] += dt
+
+                remaining = []
+
+                for seq in seqs:
+                    # Generate tokens and advance the sequence context.
+                    seq["produced"] += self.tokens_per_step
+                    seq["ctx"] += self.tokens_per_step
+                    seq["steps"] += 1
+
+                    # Record the first-token time at the end of step one.
+                    if seq["first"] is None:
+                        seq["first"] = gpu["clock"]
+
+                    if seq["produced"] >= seq["req"]["out"]:
+                        req = seq["req"]
+
+                        req["t_done"] = gpu["clock"]
+                        req["t_first_token"] = seq["first"]
+
+                        # Exclude the first-token step when measuring
+                        # average time between subsequent generated tokens.
+                        if seq["steps"] > 1:
+                            req["tbt_ms"] = round(
+                                (gpu["clock"] - seq["first"])
+                                / (seq["steps"] - 1),
+                                3,
+                            )
+                        else:
+                            req["tbt_ms"] = 0.0
+
+                        req["gpu"] = gpu_idx
+                        self.finished.append(req)
+
+                        # Release the originally reserved resources.
+                        gpu["used_slots"] -= 1
+                        reserved_bytes = (
+                            req["ctx"] + req["out"]
+                        ) * self.bytes_per_token
+
+                        gpu["used_kv"] = max(
+                            0.0,
+                            gpu["used_kv"] - reserved_bytes,
+                        )
+                    else:
+                        remaining.append(seq)
+
+                gpu["seqs"] = remaining
+
+        # Do not admit newly unblocked requests inside this call.
+        # The next admission or drain_all iteration handles the queue.
+        return len(self.finished)
+
+    def drain_all(self):
+        # Continue until no runnable sequences or admissible waiting
+        # requests remain.
+        while self.waiting or any(gpu["seqs"] for gpu in self.gpus):
+            self._drain_waiting()
+
+            # Requests may remain queued if none can fit on any GPU.
+            if not any(gpu["seqs"] for gpu in self.gpus):
+                break
+
+            latest_clock = max(
+                gpu["clock"] for gpu in self.gpus
+            )
+
+            # Snapshot clocks and sequence progress. A step can make
+            # progress even when no request has finished yet.
+            before = (
+                tuple(gpu["clock"] for gpu in self.gpus),
+                tuple(
+                    tuple(seq["steps"] for seq in gpu["seqs"])
+                    for gpu in self.gpus
+                ),
+                len(self.finished),
+                len(self.waiting),
+            )
+
+            # Advance past the latest clock; slow GPUs may need multiple
+            # steps to reach this horizon.
+            self.run_until(latest_clock + 1.0)
+
+            after = (
+                tuple(gpu["clock"] for gpu in self.gpus),
+                tuple(
+                    tuple(seq["steps"] for seq in gpu["seqs"])
+                    for gpu in self.gpus
+                ),
+                len(self.finished),
+                len(self.waiting),
+            )
+
+            # Stop only if the simulation genuinely made no progress.
+            if after == before:
+                break
+
+        return self.finished
+

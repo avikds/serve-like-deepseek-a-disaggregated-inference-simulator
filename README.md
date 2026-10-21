@@ -22,6 +22,7 @@ python scaffold.py
 - [x] **10.** expert_loads
 - [x] **11.** moe_lb_trace
 - [x] **12.** route_decode
+- [x] **13.** DecodePool
 
 ---
 
