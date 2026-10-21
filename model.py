@@ -1463,3 +1463,151 @@ def decode_throughput_curve(conc_list, alpha, t0, kappa, fixed_m=5):
 
     return results
 
+# Step 23 - simulate_cluster
+def simulate_cluster(workload, n_prefill, n_decode, cfg):
+    # Copy every request so the caller's workload remains unchanged.
+    requests = [dict(req) for req in workload]
+    n_requests = len(requests)
+
+    # Handle an empty workload without running either pool.
+    if n_requests == 0:
+        return {
+            "tokens_per_s": 0.0,
+            "ttft_p50_ms": 0.0,
+            "ttft_p99_ms": 0.0,
+            "tbt_p50_ms": 0.0,
+            "tbt_p99_ms": 0.0,
+            "makespan_ms": 0.0,
+            "prefill_utilization": 0.0,
+            "decode_utilization": 0.0,
+            "n_requests": 0,
+        }
+
+    # Run the prefill pool. It stamps t_prefill_done on each
+    # completed request, with timestamps expressed in milliseconds.
+    prefill_stats = run_prefill_pool(
+        requests,
+        n_prefill,
+        cfg["coeffs"],
+        cfg["budget_ns"],
+        tiered=cfg.get("tiered", True),
+    )
+
+    # Construct the decode pool using the supplied configuration.
+    pool = DecodePool(
+        n_decode,
+        cfg["slots"],
+        cfg["kv_bytes"],
+        cfg["bytes_per_token"],
+        cfg["decode"],
+        router=cfg.get("router", "headroom"),
+        tokens_per_step=cfg.get("tokens_per_step", 1.0),
+    )
+
+    # Transfer requests in prefill-completion order, with request ID
+    # as the deterministic tie-breaker.
+    completed_prefill = sorted(
+        requests,
+        key=lambda r: (r["t_prefill_done"], r["id"]),
+    )
+
+    link_bytes_per_ms = cfg.get("link_bytes_per_ms", 6.25e6)
+
+    if link_bytes_per_ms <= 0:
+        raise ValueError("link_bytes_per_ms must be positive")
+
+    for req in completed_prefill:
+        # Model transfer time across the interconnect in milliseconds.
+        transfer_ms = (
+            req["ctx"] * cfg["bytes_per_token"] / link_bytes_per_ms
+        )
+        t_in = req["t_prefill_done"] + transfer_ms
+
+        # Advance the decode GPUs to the transfer-completion time,
+        # then admit the request.
+        pool.run_until(t_in)
+        pool.admit(req, t_in)
+
+    # Drain all remaining decode work.
+    pool.drain_all()
+
+    # Collect end-to-end latency, first-token latency, and inter-token
+    # latency from the original request copies, now updated by DecodePool.
+    done_requests = pool.finished
+
+    if not done_requests:
+        return {
+            "tokens_per_s": 0.0,
+            "ttft_p50_ms": 0.0,
+            "ttft_p99_ms": 0.0,
+            "tbt_p50_ms": 0.0,
+            "tbt_p99_ms": 0.0,
+            "makespan_ms": 0.0,
+            "prefill_utilization": round(
+                float(prefill_stats["utilization"]), 4
+            ),
+            "decode_utilization": 0.0,
+            "n_requests": n_requests,
+        }
+
+    # The makespan is the latest decode completion time, in milliseconds.
+    makespan_ms = max(req["t_done"] for req in done_requests)
+
+    # Total generated output tokens divided by elapsed simulation time.
+    total_output_tokens = sum(req["out"] for req in done_requests)
+    tokens_per_s = (
+        total_output_tokens * 1000.0 / makespan_ms
+        if makespan_ms > 0
+        else 0.0
+    )
+
+    # TTFT is measured from the original request arrival time.
+    ttft_values = [
+        req["t_first_token"] - req["t_arrive"] * 1000.0
+        for req in done_requests
+    ]
+
+    ttft_p50_ms = float(np.percentile(ttft_values, 50))
+    ttft_p99_ms = float(np.percentile(ttft_values, 99))
+
+    # TBT percentiles include only requests with output length > 1.
+    tbt_values = [
+        req["tbt_ms"]
+        for req in done_requests
+        if req["out"] > 1
+    ]
+
+    if tbt_values:
+        tbt_p50_ms = float(np.percentile(tbt_values, 50))
+        tbt_p99_ms = float(np.percentile(tbt_values, 99))
+    else:
+        tbt_p50_ms = 0.0
+        tbt_p99_ms = 0.0
+
+    # Decode utilization is total GPU busy time divided by total
+    # available decode-GPU time over the makespan.
+    total_decode_busy_ms = sum(
+        gpu["busy_ms"] for gpu in pool.gpus
+    )
+    total_decode_capacity_ms = n_decode * makespan_ms
+
+    decode_utilization = (
+        total_decode_busy_ms / total_decode_capacity_ms
+        if total_decode_capacity_ms > 0
+        else 0.0
+    )
+
+    return {
+        "tokens_per_s": round(tokens_per_s, 1),
+        "ttft_p50_ms": round(ttft_p50_ms, 1),
+        "ttft_p99_ms": round(ttft_p99_ms, 1),
+        "tbt_p50_ms": round(tbt_p50_ms, 2),
+        "tbt_p99_ms": round(tbt_p99_ms, 2),
+        "makespan_ms": round(makespan_ms, 1),
+        "prefill_utilization": round(
+            float(prefill_stats["utilization"]), 4
+        ),
+        "decode_utilization": round(decode_utilization, 4),
+        "n_requests": n_requests,
+    }
+
