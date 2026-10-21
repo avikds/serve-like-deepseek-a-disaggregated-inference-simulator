@@ -25,6 +25,7 @@ python scaffold.py
 - [x] **13.** DecodePool
 - [x] **14.** block_hashes
 - [x] **15.** prefix_hit
+- [x] **16.** KVStore
 
 ---
 

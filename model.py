@@ -1093,3 +1093,76 @@ def prefix_hit(blocks, swa, hashes, n_tokens, block=128, window=128, backtrack=6
         "hit": max(0, min(hit, cap)),
     }
 
+# Step 16 - KVStore
+class KVStore:
+    def __init__(self, capacity_bytes, ttl_s, bytes_per_block, watermark=0.9):
+        self.capacity_bytes = capacity_bytes
+        self.ttl_s = ttl_s
+        self.bytes_per_block = float(bytes_per_block)
+        self.watermark = watermark
+
+        # Entries are ordered from least recently used to most recently used.
+        self.entries = collections.OrderedDict()
+
+        self.requested = 0
+        self.hit = 0
+
+    def __contains__(self, h):
+        return h in self.entries
+
+    def size_bytes(self):
+        # Return a float, including when the block count is an integer.
+        return len(self.entries) * self.bytes_per_block
+
+    def lookup(self, hashes, now):
+        # Every supplied block counts as a request.
+        self.requested += len(hashes)
+
+        run_length = 0
+
+        # Count only the leading consecutive run of cached hashes.
+        for h in hashes:
+            if h not in self.entries:
+                break
+
+            # Refresh its last-use time and move it to the MRU end.
+            self.entries[h] = now
+            self.entries.move_to_end(h)
+            run_length += 1
+
+        self.hit += run_length
+        return run_length
+
+    def insert(self, hashes, now):
+        # Insert or refresh keys, moving each to the MRU end.
+        for h in hashes:
+            self.entries[h] = now
+            self.entries.move_to_end(h)
+
+        return self.gc(now)
+
+    def gc(self, now):
+        evicted = 0
+        max_size = self.watermark * self.capacity_bytes
+
+        # Remove expired or over-capacity entries from the LRU end.
+        while self.entries:
+            oldest_hash, last_use = next(iter(self.entries.items()))
+
+            expired = now - last_use > self.ttl_s
+            over_capacity = self.size_bytes() > max_size
+
+            if not expired and not over_capacity:
+                break
+
+            self.entries.popitem(last=False)
+            evicted += 1
+
+        return evicted
+
+    def hit_rate(self):
+        if self.requested == 0:
+            return 0.0
+
+        return self.hit / self.requested
+
