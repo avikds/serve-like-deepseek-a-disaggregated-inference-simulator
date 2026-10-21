@@ -14,6 +14,7 @@ python scaffold.py
 - [x] **2.** fit_cost_model
 - [x] **3.** tier_demand
 - [x] **4.** decode_step_time
+- [x] **5.** chunk_for
 
 ---
 

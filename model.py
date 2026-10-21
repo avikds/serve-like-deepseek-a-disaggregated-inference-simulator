@@ -186,3 +186,36 @@ def decode_step_time(B, K, params):
         + params["beta"] * K
     )
 
+# Step 5 - chunk_for
+def chunk_for(remaining_ns, c, coeffs, cap=32768):
+    # No prefill work can be scheduled when the time budget is non-positive.
+    if remaining_ns <= 0:
+        return 0
+
+    # Unpack the quadratic cost-model coefficients.
+    a, b, d = coeffs
+    lin = b * c + d
+    R = remaining_ns
+
+    # Solve a*q^2 + lin*q - R = 0 for the positive boundary.
+    if a > 0:
+        discriminant = lin**2 + 4 * a * R
+        root = (-lin + math.sqrt(discriminant)) / (2 * a)
+    else:
+        # When the quadratic coefficient is zero or negative,
+        # use the linear solution when the linear coefficient is positive.
+        if lin <= 0:
+            return cap
+        root = R / lin
+
+    # Floor the boundary, adding a tiny epsilon to absorb floating-point
+    # rounding errors near integer values.
+    q = max(0, math.floor(root + 1e-9))
+
+    # Correct any rounding error that would make the chunk exceed the budget.
+    while q > 0 and prefill_cost(q, c, coeffs) > R:
+        q -= 1
+
+    # Enforce the maximum permitted chunk size.
+    return min(q, cap)
+
