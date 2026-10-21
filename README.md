@@ -35,6 +35,7 @@ python scaffold.py
 - [x] **23.** simulate_cluster
 - [x] **24.** sweep_pd_ratio
 - [x] **25.** pareto_frontier
+- [x] **26.** serving_report
 
 ---
 

@@ -1686,3 +1686,133 @@ def pareto_frontier(points, x_key, y_key):
 
     return frontier
 
+# Step 26 - serving_report
+def serving_report(seed=0, n_requests=160, total_gpus=8):
+    # 1. Generate the workload and define the cost model.
+    wl = make_workload(n_requests, seed)
+    coeffs = (0.2, 0.2, 30000.0)
+
+    cfg = {
+        "coeffs": coeffs,
+        "budget_ns": 2e8,
+        "slots": 64,
+        "kv_bytes": 100e9,
+        "bytes_per_token": 12288,
+        "decode": {
+            "t0": 9.7,
+            "alpha": 0.2,
+            "beta": 1e-5,
+            "moe_lb": 1.09,
+        },
+    }
+
+    # 2. Count requests per class.
+    workload_counts = {
+        cls: sum(1 for req in wl if req["cls"] == cls)
+        for cls in ("chat", "agent", "doc")
+    }
+
+    # 3. Measure context-tier demand.
+    tiers = tier_demand(wl, coeffs)
+
+    # 4. Compare tiered and FIFO prefill scheduling.
+    prefill_tiered_result = run_prefill_pool(
+        [dict(req) for req in wl],
+        4, coeffs, 2e8, tiered=True,
+    )
+
+    prefill_fifo_result = run_prefill_pool(
+        [dict(req) for req in wl],
+        4, coeffs, 2e8, tiered=False,
+    )
+
+    prefill_tiered = prefill_tiered_result["by_tier"]
+    prefill_fifo = prefill_fifo_result["by_tier"]
+
+    # 5. Profile expert-parallel load balancing.
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(64)
+
+    step_loads = np.array([
+        expert_loads(4096, 64, 8, 1.0, rng, perm)
+        for _ in range(60)
+    ])
+
+    eplb_none = moe_lb_trace(step_loads, 8, 0, 20, 20)
+    eplb_redundant = moe_lb_trace(step_loads, 8, 2, 20, 20)
+
+    eplb = {
+        "none": eplb_none["mean"],
+        "redundant": eplb_redundant["mean"],
+    }
+
+    # 6. Measure prefix-cache hit rates at different TTLs.
+    chat_stream = make_reuse_stream(6000, seed, "chat")
+    agent_stream = make_reuse_stream(6000, seed + 1, "agent")
+
+    hit_rates = {
+        "chat": hit_rate_vs_ttl(chat_stream, (1, 3, 7), 10**9),
+        "agent": hit_rate_vs_ttl(agent_stream, (1, 3, 7), 10**9),
+    }
+
+    # 7. Compare fixed and dynamic speculative verification.
+    alpha = [0.9, 0.72, 0.432, 0.1296, 0.013]
+
+    dspark = decode_throughput_curve(
+        [16, 32, 60, 96],
+        alpha, 9.7, 0.013,
+    )
+
+    # 8. Compare serial and asynchronous scheduling.
+    async_means = {
+        mode: async_step_times(
+            50, 1.5, 12.0, 0.5, 2.0, 0.3, mode
+        )["mean_step"]
+        for mode in ("serial", "async")
+    }
+
+    # 9. Choose the verification budget from the throughput curve.
+    verification = verification_budget(alpha, 60, 9.7, 0.013)
+
+    cfg_spec = dict(cfg)
+    cfg_spec["tokens_per_step"] = verification["tokens_per_step"]
+
+    # 10. Sweep prefill/decode GPU allocations.
+    sweep = sweep_pd_ratio(
+        wl,
+        total_gpus,
+        cfg_spec,
+        (0.25, 0.5, 0.75),
+    )
+
+    # 11. Extract the Pareto frontier.
+    frontier = pareto_frontier(
+        sweep, "tokens_per_s", "ttft_p99_ms"
+    )
+
+    # 12. Price each operating point.
+    # Use uppercase P and D in keys, as required by the tests.
+    cost = {
+        f"{row['n_prefill']}P{row['n_decode']}D": cost_per_million(
+            row["tokens_per_s"],
+            total_gpus,
+            2.0,
+        )
+        for row in sweep
+    }
+
+    # 13. Return the complete report.
+    return {
+        "workload": workload_counts,
+        "tiers": tiers,
+        "prefill_tiered": prefill_tiered,
+        "prefill_fifo": prefill_fifo,
+        "eplb": eplb,
+        "hit_rate": hit_rates,
+        "dspark": dspark,
+        "async": async_means,
+        "sweep": sweep,
+        "frontier": frontier,
+        "cost": cost,
+    }
+
