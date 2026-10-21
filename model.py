@@ -560,3 +560,109 @@ def run_prefill_pool(
         "ttft_ms": ttft_by_id,
     }
 
+# Step 9 - eplb_assign
+def moe_lb(rank_loads):
+    # Calculate the mean load across all ranks.
+    if not rank_loads:
+        return 1.0
+
+    mean_load = sum(rank_loads) / len(rank_loads)
+
+    # Avoid division by zero when all ranks have zero load.
+    if mean_load == 0:
+        return 1.0
+
+    # Ratio of the slowest (most heavily loaded) rank to the mean load.
+    return round(max(rank_loads) / mean_load, 4)
+
+
+def eplb_assign(loads, n_ranks, redundant_per_rank):
+    # Each expert's load is initially assigned to one copy.
+    loads = list(loads)
+    n_experts = len(loads)
+
+    if n_ranks <= 0:
+        raise ValueError("n_ranks must be positive")
+
+    copies = [1] * n_experts
+
+    # Each rank has its base number of expert slots plus redundant slots.
+    base_slots = n_experts // n_ranks
+    slots_per_rank = base_slots + redundant_per_rank
+
+    # Allocate redundant copies one slot at a time.
+    spare_slots = n_ranks * redundant_per_rank
+
+    for _ in range(spare_slots):
+        # An expert cannot have more copies than there are ranks.
+        eligible = [
+            i for i in range(n_experts)
+            if copies[i] < n_ranks
+        ]
+
+        # Stop if every expert already has the maximum number of copies.
+        if not eligible:
+            break
+
+        # Give the next copy to the expert with the greatest load per copy.
+        # Ties go to the expert with the lower index.
+        expert = max(
+            eligible,
+            key=lambda i: (loads[i] / copies[i], -i)
+        )
+
+        copies[expert] += 1
+
+    # Initialize per-rank placement, loads, and remaining slot capacity.
+    placement = [[] for _ in range(n_ranks)]
+    rank_loads = [0.0] * n_ranks
+    free_slots = [slots_per_rank] * n_ranks
+
+    # Place the most heavily loaded experts per copy first.
+    # Ties are broken by the lower expert index.
+    expert_order = sorted(
+        range(n_experts),
+        key=lambda i: (-loads[i] / copies[i], i)
+    )
+
+    for expert in expert_order:
+        # Find ranks with available capacity, ordered by current load.
+        available_ranks = sorted(
+            (
+                rank for rank in range(n_ranks)
+                if free_slots[rank] > 0
+            ),
+            key=lambda rank: (rank_loads[rank], rank)
+        )
+
+        # Use distinct ranks for an expert's replicas. If fewer ranks
+        # have available slots than requested, reduce its copy count.
+        actual_copies = min(copies[expert], len(available_ranks))
+        copies[expert] = actual_copies
+
+        # No placement is possible if no rank has an available slot.
+        if actual_copies == 0:
+            continue
+
+        # Divide the expert's load equally among its actual copies.
+        load_per_copy = loads[expert] / actual_copies
+
+        # Place copies on the least-loaded available ranks.
+        for rank in available_ranks[:actual_copies]:
+            placement[rank].append(expert)
+            free_slots[rank] -= 1
+            rank_loads[rank] += load_per_copy
+
+    # Sort expert IDs within each rank for deterministic output.
+    for rank in placement:
+        rank.sort()
+
+    # Return rank loads rounded to four decimal places and the
+    # expert-parallel load imbalance calculated from the actual loads.
+    return {
+        "replicas": copies,
+        "placement": placement,
+        "rank_loads": [round(load, 4) for load in rank_loads],
+        "moe_lb": moe_lb(rank_loads),
+    }
+
