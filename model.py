@@ -768,3 +768,41 @@ def moe_lb_trace(step_loads, n_ranks, redundant_per_rank, window, period):
         "reassignments": reassignments,
     }
 
+# Step 12 - route_decode
+def route_decode(need_tokens, gpus, bytes_per_token):
+    # Calculate the KV-cache memory required by this request.
+    need = need_tokens * bytes_per_token
+
+    best_gpu = -1
+    best_headroom = -1
+
+    # Examine GPUs in index order so ties favor the lower index.
+    for i, gpu in enumerate(gpus):
+        # Calculate the remaining batch slots and KV-cache memory.
+        free_slots = gpu["slots"] - gpu["used_slots"]
+        free_kv = gpu["kv_bytes"] - gpu["used_kv"]
+
+        # A GPU is feasible only if it has a free slot and enough memory.
+        if free_slots <= 0 or free_kv < need:
+            continue
+
+        # Calculate how many additional copies of this request could fit.
+        # When the request requires zero KV memory, available slots are
+        # the only limiting factor.
+        if need == 0:
+            headroom = free_slots
+        else:
+            headroom = min(
+                free_slots,
+                int(free_kv // need)
+            )
+
+        # Update only when headroom is strictly greater, preserving
+        # the lower GPU index when multiple GPUs tie.
+        if headroom > best_headroom:
+            best_headroom = headroom
+            best_gpu = i
+
+    # Return -1 if no GPU can accommodate the request.
+    return best_gpu
+
