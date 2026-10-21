@@ -29,6 +29,7 @@ python scaffold.py
 - [x] **17.** make_reuse_stream
 - [x] **18.** hit_rate_vs_ttl
 - [x] **19.** plan_verification
+- [x] **20.** verification_budget
 
 ---
 

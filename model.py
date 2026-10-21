@@ -1286,3 +1286,49 @@ def plan_verification(conf, budget):
         "verified": n_verified,
     }
 
+# Step 20 - verification_budget
+def verification_budget(alpha, conc, t0, kappa):
+    # Convert acceptance probabilities to a NumPy array.
+    alpha = np.asarray(alpha, dtype=float)
+
+    table = []
+    throughputs = []
+    accepted_by_length = []
+
+    # Evaluate every possible verification length, including m = 0
+    # (no speculative draft tokens).
+    for m in range(len(alpha) + 1):
+        # Expected accepted tokens per sequence per step.
+        accepted = 1.0 + float(np.sum(alpha[:m]))
+        accepted_by_length.append(accepted)
+
+        # Time required for a decode step, in milliseconds.
+        step_ms = t0 + kappa * conc * (1 + m)
+
+        # Throughput in tokens per second.
+        if step_ms > 0:
+            throughput = conc * accepted / step_ms * 1000.0
+        else:
+            throughput = 0.0
+
+        throughputs.append(throughput)
+
+        # Store the reported throughput rounded to one decimal place.
+        table.append((m, round(throughput, 1)))
+
+    # Choose the smallest verification length attaining maximum throughput.
+    best_m = max(
+        range(len(throughputs)),
+        key=lambda m: (throughputs[m], -m)
+    )
+
+    # Calculate expected tokens generated per sequence per step
+    # at the optimal verification length.
+    tokens_per_step = round(accepted_by_length[best_m], 4)
+
+    return {
+        "table": table,
+        "best_m": best_m,
+        "tokens_per_step": tokens_per_step,
+    }
+
