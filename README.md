@@ -16,6 +16,7 @@ python scaffold.py
 - [x] **4.** decode_step_time
 - [x] **5.** chunk_for
 - [x] **6.** plan_prefill_step
+- [x] **7.** PrefillEngine
 
 ---
 

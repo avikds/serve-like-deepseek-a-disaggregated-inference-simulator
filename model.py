@@ -256,3 +256,90 @@ def plan_prefill_step(queue, budget_ns, coeffs, cap=32768):
         "left_ns": int(round(remaining_ns)),
     }
 
+# Step 7 - PrefillEngine
+import collections
+
+
+class PrefillEngine:
+    def __init__(self, coeffs, budget_ns, cap=32768):
+        # Store the prefill cost model and scheduling constraints.
+        self.coeffs = coeffs
+        self.budget_ns = budget_ns
+        self.cap = cap
+
+        # FIFO queue containing requests awaiting prefill completion.
+        self.queue = collections.deque()
+
+        # Cumulative simulated GPU busy time, measured in milliseconds.
+        self.busy_ms = 0.0
+
+    def submit(self, req):
+        # Store the uncached tokens still requiring prefill, the cached
+        # prefix length, and a reference to the original request.
+        item = {
+            "id": req["id"],
+            "left": req["ctx"] - req["cached"],
+            "prefix": req["cached"],
+            "t_arrive": req["t_arrive"],
+            "req": req,
+        }
+
+        self.queue.append(item)
+
+    def pending_tokens(self):
+        # Return the total number of tokens still requiring prefill.
+        return sum(item["left"] for item in self.queue)
+
+    def step(self, now_ms):
+        # Take a snapshot so chunk indices refer to a stable queue order.
+        items = list(self.queue)
+
+        # Plan one FIFO scheduling step within the configured time budget.
+        plan = plan_prefill_step(
+            items,
+            self.budget_ns,
+            self.coeffs,
+            self.cap,
+        )
+
+        chunks = plan["chunks"]
+
+        # Nothing can execute if no positive-sized chunks were scheduled.
+        if not chunks:
+            return []
+
+        # Convert the consumed time from nanoseconds to milliseconds.
+        step_ms = plan["used_ns"] / 1e6
+
+        # Accumulate simulated GPU utilization time.
+        self.busy_ms += step_ms
+
+        # Apply the scheduled prefill chunks to their corresponding requests.
+        for index, q in chunks:
+            item = items[index]
+            item["left"] -= q
+            item["prefix"] += q
+
+        # Remove completed requests while preserving the FIFO order of
+        # unfinished requests and the completion order of finished requests.
+        completed = []
+
+        for _ in range(len(self.queue)):
+            item = self.queue.popleft()
+
+            if item["left"] <= 0:
+                req = item["req"]
+
+                # Record completion time and time to first token in milliseconds.
+                req["t_prefill_done"] = now_ms + step_ms
+                req["ttft_ms"] = (
+                    now_ms + step_ms - item["t_arrive"] * 1000
+                )
+
+                completed.append(req)
+            else:
+                # Unfinished requests remain in their original relative order.
+                self.queue.append(item)
+
+        return completed
+
