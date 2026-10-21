@@ -73,3 +73,31 @@ def make_workload(n, seed, rate=4.0, mix=(0.7, 0.2, 0.1)):
 
     return workload
 
+# Step 2 - fit_cost_model
+def prefill_cost(q, c, coeffs):
+    # Unpack the fitted coefficients: quadratic, cross-term, and linear.
+    a, b, d = coeffs
+
+    # Estimate prefill execution time in nanoseconds.
+    return float(a * q**2 + b * q * c + d * q)
+
+
+def fit_cost_model(samples):
+    # Build the design matrix with columns [q^2, q*c, q].
+    X = np.array(
+        [[q**2, q * c, q] for q, c, t in samples],
+        dtype=float
+    )
+
+    # Observed prefill times, in nanoseconds.
+    y = np.array(
+        [t for q, c, t in samples],
+        dtype=float
+    )
+
+    # Solve the least-squares problem X @ [a, b, d] ~= y.
+    coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+
+    # Return Python floats rounded to six decimal places.
+    return tuple(float(round(value, 6)) for value in coeffs)
+
