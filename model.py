@@ -219,3 +219,40 @@ def chunk_for(remaining_ns, c, coeffs, cap=32768):
     # Enforce the maximum permitted chunk size.
     return min(q, cap)
 
+# Step 6 - plan_prefill_step
+def plan_prefill_step(queue, budget_ns, coeffs, cap=32768):
+    # Track the remaining time budget without modifying the input queue.
+    remaining_ns = budget_ns
+    chunks = []
+
+    # Process requests in FIFO order.
+    for index, item in enumerate(queue):
+        # Stop if the remaining time budget is exhausted.
+        if remaining_ns <= 0:
+            break
+
+        # Determine the largest chunk that fits the remaining budget,
+        # while ensuring we do not process more than the request needs.
+        q = min(
+            chunk_for(remaining_ns, item["prefix"], coeffs, cap),
+            item["left"],
+        )
+
+        # Stop at the first request that cannot receive a positive chunk.
+        if q <= 0:
+            break
+
+        # Record the request index and the number of tokens to prefill.
+        chunks.append((index, q))
+
+        # Calculate the time consumed by this chunk and update the budget.
+        remaining_ns -= prefill_cost(q, item["prefix"], coeffs)
+
+    # Report the total time used and the budget remaining, rounded to
+    # integer nanoseconds as required.
+    return {
+        "chunks": chunks,
+        "used_ns": int(round(budget_ns - remaining_ns)),
+        "left_ns": int(round(remaining_ns)),
+    }
+

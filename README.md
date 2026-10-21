@@ -15,6 +15,7 @@ python scaffold.py
 - [x] **3.** tier_demand
 - [x] **4.** decode_step_time
 - [x] **5.** chunk_for
+- [x] **6.** plan_prefill_step
 
 ---
 
