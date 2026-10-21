@@ -1611,3 +1611,41 @@ def simulate_cluster(workload, n_prefill, n_decode, cfg):
         "n_requests": n_requests,
     }
 
+# Step 24 - sweep_pd_ratio
+def sweep_pd_ratio(workload, total_gpus, cfg, prefill_fracs=(0.25, 0.5, 0.75)):
+    results = []
+
+    # Evaluate each requested prefill fraction in the supplied order.
+    for f in prefill_fracs:
+        # Allocate at least one GPU to prefill and reserve the remaining
+        # GPUs for decode, following the specified rounding rule.
+        n_prefill = max(
+            1,
+            min(
+                total_gpus - 1,
+                int(round(f * total_gpus)),
+            ),
+        )
+        n_decode = total_gpus - n_prefill
+
+        # Simulate the cluster for this GPU allocation.
+        metrics = simulate_cluster(
+            workload,
+            n_prefill,
+            n_decode,
+            cfg,
+        )
+
+        # Collect the requested performance and utilization metrics.
+        results.append({
+            "n_prefill": n_prefill,
+            "n_decode": n_decode,
+            "tokens_per_s": metrics["tokens_per_s"],
+            "ttft_p99_ms": metrics["ttft_p99_ms"],
+            "tbt_p99_ms": metrics["tbt_p99_ms"],
+            "prefill_utilization": metrics["prefill_utilization"],
+            "decode_utilization": metrics["decode_utilization"],
+        })
+
+    return results
+

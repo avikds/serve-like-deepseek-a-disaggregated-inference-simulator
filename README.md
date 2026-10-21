@@ -33,6 +33,7 @@ python scaffold.py
 - [x] **21.** async_step_times
 - [x] **22.** decode_throughput_curve
 - [x] **23.** simulate_cluster
+- [x] **24.** sweep_pd_ratio
 
 ---
 
