@@ -1216,3 +1216,33 @@ def make_reuse_stream(n, seed, cls, days=14.0):
         for i in order
     ]
 
+# Step 18 - hit_rate_vs_ttl
+def hit_rate_vs_ttl(stream, ttls_days, capacity_blocks):
+    # Store the measured hit rate for each requested TTL.
+    results = {}
+
+    # Evaluate the same request stream independently for every TTL.
+    for ttl in ttls_days:
+        store = KVStore(
+            capacity_blocks,
+            ttl,
+            1.0,
+            watermark=1.0,
+        )
+
+        # Replay requests in their original chronological order.
+        for t, pid, nb in stream:
+            # Construct the block keys for this request's prefix.
+            keys = [(pid, j) for j in range(nb)]
+
+            # Look up the cached prefix before inserting its blocks.
+            store.lookup(keys, t)
+
+            # Insert or refresh the request's blocks at the current time.
+            store.insert(keys, t)
+
+        # Record the hit rate rounded to four decimal places.
+        results[ttl] = round(store.hit_rate(), 4)
+
+    return results
+
